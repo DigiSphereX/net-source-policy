@@ -2,6 +2,23 @@
 
 All notable changes to NetSource Policy are documented here.
 
+## [2.1.2] - 2026-09-12
+
+### Fixed
+- The engine could stay on Ethernet even while connected to the hotspot (the "still takes
+  internet from the cable" issue). The live probe used PowerShell cmdlets (`Test-Connection
+  -Source`, `Test-NetConnection -SourceAddress`) that do not exist in Windows PowerShell
+  5.1; the probe silently stalled, so every automatic poll hung and no rule was ever applied.
+  The probe is now built on a short-timeout `TcpClient` socket against a temporary targeted
+  route through the chosen interface (2.5 s, auto-cleanup), which works from both the normal
+  user and the SYSTEM account the WMI polls run under.
+- The internet-source rule is now matched through `Get-NetConnectionProfile` (verified working
+  in every context including SYSTEM), not `netsh wlan`, which requires location consent and
+  elevation and returned nothing from the background poll.
+- Launcher (`NetSourcePolicy.exe`) now starts the interface with `CreateNoWindow`, so no
+  PowerShell/console window pops up on the taskbar; and the window itself now shows the
+  application icon instead of the generic PowerShell icon.
+
 ## [2.1.1] - 2026-09-12
 
 ### Fixed

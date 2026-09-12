@@ -27,7 +27,9 @@ namespace NetSourcePolicy
                 FileName = "powershell.exe",
                 Arguments = string.Format("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{0}\"", script),
                 WorkingDirectory = dir,
-                UseShellExecute = false
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
             };
 
             try

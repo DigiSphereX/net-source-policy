@@ -1,4 +1,4 @@
-# NetSource Policy - portable routing engine
+# NetSource Policy - portable routing engine (v2.1.2)
 # Actions: Apply | Install | Uninstall | Status    (optional -Poll = background re-check)
 # The engine reads config\config.json and applies interface metrics + persistent routes
 # so that the chosen Internet source and the home-LAN priority match the user's rules.
@@ -86,12 +86,44 @@ try {
         return $false
     }
 
-    # True end-to-end probe THROUGH a specific interface (source-bound ping).
-    # This is what actually decides "does the phone really give Internet right now",
-    # instead of trusting Windows' claim that the SSID is "Internet".
-    function Probe-Via-Source([string]$src) {
-        if (-not $src) { return $false }
-        return [bool](Test-Connection -ComputerName '8.8.8.8' -Source $src -Count 1 -Quiet -ErrorAction SilentlyContinue)
+# True end-to-end probe THROUGH a specific interface. This actually decides 'does the
+    # phone really give Internet right now' instead of trusting Windows' claim that the SSID
+    # is 'Internet' (which a hotspot reports even when it has no data).
+    function Probe-Via-Source([string]$src, [string]$gw, [int]$ifIndex) {
+        # The probe must not leave a trace and must not disturb other traffic: we add a
+        # TARGETED temporary route for the probe destination via the chosen interface,
+        # test TCP connectivity with a short-timeout socket, then delete the route.
+        if (-not $src -or -not $gw -or -not $ifIndex) { return $false }
+        if (Get-NetRoute -DestinationPrefix '8.8.8.0/24' -ErrorAction SilentlyContinue) { return $false }
+        cmd.exe /c "route add 8.8.8.0 mask 255.255.255.0 $gw metric 1 if $ifIndex" | Out-Null
+        try {
+            foreach ($ep in @(@('8.8.8.8', 53), @('1.1.1.1', 80), @('1.1.1.1', 443))) {
+                $c = New-Object System.Net.Sockets.TcpClient
+                try {
+                    $ar = $c.BeginConnect($ep[0], $ep[1], $null, $null)
+                    if ($ar.AsyncWaitHandle.WaitOne(2500) -and $c.Connected) { return $true }
+                } catch {} finally { $c.Close() }
+            }
+            return $false
+        } finally {
+            cmd.exe /c "route delete 8.8.8.0 mask 255.255.255.0 $gw" | Out-Null
+        }
+    }
+
+    # SSID of a Wi-Fi interface. Get-NetConnectionProfile works for both the interactive
+    # user and the SYSTEM account under which the WMI polls run (verified). netsh wlan
+    # requires location permission + elevation, so it is only a fallback.
+    function Get-InterfaceSsid([string]$alias) {
+        try {
+            $p = Get-NetConnectionProfile -InterfaceAlias $alias -ErrorAction SilentlyContinue
+            if ($p -and $p.Name) { return $p.Name }
+        } catch {}
+        try {
+            foreach ($line in (netsh wlan show interfaces 2>$null)) {
+                if ($line -match '^\s*SSID\s*:\s*(.+?)\s*$') { return $Matches[1].Trim() }
+            }
+        } catch {}
+        return ''
     }
 
     # Cooldown: after a gateway was pinned and proven dead, do not re-pin it for a few minutes,
@@ -215,7 +247,7 @@ try {
         return ($p.Count -eq 0 -and ($null -eq $em -or $em -eq $EthMetric))
     }
 
-    function Apply-Decision {
+function Apply-Decision {
         # SELF-HEAL: if a pinned default route is installed but the Internet is unreachable,
         # remove our pins immediately so Windows falls back to the best adapter (usually Ethernet).
         $pinned = @(Get-NetRoute -PolicyStore 'PersistentStore' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
@@ -230,21 +262,23 @@ try {
             if (-not $r.enabled) { continue }
             $ad = Get-NetAdapter -Name $r.interface -ErrorAction SilentlyContinue
             if (-not $ad -or $ad.Status -ne 'Up') { continue }
-            $prof = Get-NetConnectionProfile -InterfaceAlias $r.interface -ErrorAction SilentlyContinue
-            if (-not $prof) { continue }
-            if ($prof.Name -like $r.ssidPrefix) { $rule = $r; $prefer = $ad; break }
+            if ($r.ssidPrefix) {
+                $ssidNow = Get-InterfaceSsid $r.interface
+                if ($ssidNow -like $r.ssidPrefix) { $rule = $r; $prefer = $ad; break }
+            } else {
+                $rule = $r; $prefer = $ad; break
+            }
         }
 
         $ssid = ''
         $wifiInternet = $false
         if ($prefer) {
-            $prof = Get-NetConnectionProfile -InterfaceAlias $prefer.Name
-            if ($prof) {
-                $ssid = $prof.Name
-                $wifiInternet = ($prof.IPv4Connectivity -eq 'Internet')
-                if ($Cfg.autoFallback -and $prefer.Name -ne $EthName -and -not $wifiInternet) { $prefer = $null; $rule = $null }
-            }
-        }
+            $ssid = Get-InterfaceSsid $prefer.Name
+            try {
+                $prof = Get-NetConnectionProfile -InterfaceAlias $prefer.Name -ErrorAction SilentlyContinue
+                if ($prof) { $wifiInternet = ($prof.IPv4Connectivity -eq 'Internet') }
+            } catch {}
+}
 
         $newState = 'eth'
         if ($prefer -and $prefer.Name -ne $EthName) {
@@ -256,7 +290,7 @@ try {
                 $ipc = Get-NetIPConfiguration -InterfaceAlias $prefer.Name
                 if ($ipc.IPv4DefaultGateway) { $gw = ($ipc.IPv4DefaultGateway | Select-Object -First 1).NextHop }
             }
-            if ($gw) { $newState = '{0}|{1}' -f $prefer.Name, $gw } else { $newState = 'pending' }
+if ($gw) { $newState = '{0}|{1}' -f $prefer.Name, $gw } else { $newState = 'pending' }
         }
 
         # GATE: only pin the Internet through the preferred adapter when it is PROVEN usable
@@ -267,7 +301,7 @@ try {
         if (-not $approved -and $prefer -and $newState -like '*|*') {
             $gw = ($newState -split '\|')[1]
             $src = Get-SourceIp $prefer.Name
-            $liveE2E = Probe-Via-Source $src
+            $liveE2E = Probe-Via-Source $src $gw $prefer.ifIndex
             $blocked = Block-Cooldown $gw
             if ($wifiInternet -and $liveE2E -and -not $blocked) {
                 $approved = $true
@@ -278,7 +312,7 @@ try {
             }
         }
 
-        $prevState = ''
+$prevState = ''
         if (Test-Path $StateFile) { $prevState = (Get-Content $StateFile -Raw).Trim() }
 
         # LAN maintenance runs on EVERY poll (also when nothing else changed): re-pin the LAN
@@ -350,7 +384,7 @@ try {
             Where-Object { $_.Filter -like '*NPS_*' -or $_.Consumer -like '*NPS_*' -or $_.Filter -like '*NetPolicy*' -or $_.Consumer -like '*NetPolicy*' } | Remove-CimInstance
     }
 
-    switch ($Action) {
+switch ($Action) {
         'Apply' {
             if ($Poll) {
                 $stampPath = Join-Path $LogDir 'lastpoll.txt'
@@ -409,3 +443,5 @@ finally {
     if ($owned) { try { $lock.ReleaseMutex() } catch {} }
     $lock.Dispose()
 }
+
+

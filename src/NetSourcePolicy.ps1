@@ -1,5 +1,5 @@
 ﻿# ============================================================================
-#  NetSource Policy  v2.1.0  -  portable GUI
+#  NetSource Policy  v2.1.2  -  portable GUI
 #  Decide which connection supplies the Internet and set network priorities.
 #  Open source (MIT).  (c) 2026 M. Basheer (DigiSphereX)
 # ============================================================================
@@ -115,6 +115,9 @@ $form.Size = New-Object System.Drawing.Size(880, 690)
 $form.MinimumSize = New-Object System.Drawing.Size(760, 600)
 $form.StartPosition = 'CenterScreen'
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+$exeIcon = Join-Path $AppRoot 'NetSourcePolicy.exe'
+if (Test-Path $exeIcon) { $form.Icon = [System.Drawing.Icon]::ExtractAssociatedIcon($exeIcon) }
+$form.ShowInTaskbar = $true
 
 $status = New-Object System.Windows.Forms.StatusStrip
 $lblStatus = New-Object System.Windows.Forms.ToolStripStatusLabel
