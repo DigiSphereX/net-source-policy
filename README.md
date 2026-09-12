@@ -4,6 +4,7 @@
 ![OS: Windows 10/11](https://img.shields.io/badge/Windows-10%2F11-blue)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1+-informational)
 ![Portable](https://img.shields.io/badge/portable-yes-lightgrey)
+[![Donate](https://img.shields.io/badge/Donate-PayPal-0070BA)](https://www.paypal.com/donate/?hosted_button_id=CFANQH892RPH2)
 
 A portable, open-source Windows tool that lets you decide **which connection supplies the
 Internet** and set the **priority rules** that keep your home LAN on the right adapter.
