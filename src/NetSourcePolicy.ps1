@@ -1,5 +1,5 @@
 ﻿# ============================================================================
-#  NetSource Policy  v2.1.2  -  portable GUI
+#  NetSource Policy  v2.1.3  -  portable GUI
 #  Decide which connection supplies the Internet and set network priorities.
 #  Open source (MIT).  (c) 2026 M. Basheer (DigiSphereX)
 # ============================================================================

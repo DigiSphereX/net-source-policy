@@ -1,4 +1,4 @@
-# NetSource Policy - portable routing engine (v2.1.2)
+# NetSource Policy - portable routing engine (v2.1.3)
 # Actions: Apply | Install | Uninstall | Status    (optional -Poll = background re-check)
 # The engine reads config\config.json and applies interface metrics + persistent routes
 # so that the chosen Internet source and the home-LAN priority match the user's rules.
@@ -45,6 +45,7 @@ $owned = $false
 try { $owned = $lock.WaitOne(0) } catch {}
 if (-not $owned) {
     if ($Action -eq 'Status') { try { Read-Cfg } catch {} }
+    if ($Poll) { Write-Log 'poll skipped: engine busy (route lock held by another run)' }
     exit
 }
 try {
@@ -80,8 +81,9 @@ try {
         Set-NetIPInterface -InterfaceAlias $EthName -InterfaceMetric $EthMetric
     }
 
-    function Probe-Internet {
+function Probe-Internet {
         if (Test-Connection -ComputerName '8.8.8.8' -Count 1 -Quiet -ErrorAction SilentlyContinue) { return $true }
+        if (Test-Connection -ComputerName '1.1.1.1' -Count 1 -Quiet -ErrorAction SilentlyContinue) { return $true }
         try { if ([System.Net.Dns]::GetHostAddresses('www.github.com')) { return $true } } catch {}
         return $false
     }
@@ -93,8 +95,9 @@ try {
         # The probe must not leave a trace and must not disturb other traffic: we add a
         # TARGETED temporary route for the probe destination via the chosen interface,
         # test TCP connectivity with a short-timeout socket, then delete the route.
-        if (-not $src -or -not $gw -or -not $ifIndex) { return $false }
-        if (Get-NetRoute -DestinationPrefix '8.8.8.0/24' -ErrorAction SilentlyContinue) { return $false }
+if (-not $src -or -not $gw -or -not $ifIndex) { return $false }
+        # Clear any leaked temporary probe route from a previous (interrupted) run, then install.
+        cmd.exe /c "route delete 8.8.8.0 mask 255.255.255.0" | Out-Null
         cmd.exe /c "route add 8.8.8.0 mask 255.255.255.0 $gw metric 1 if $ifIndex" | Out-Null
         try {
             foreach ($ep in @(@('8.8.8.8', 53), @('1.1.1.1', 80), @('1.1.1.1', 443))) {
@@ -113,11 +116,14 @@ try {
     # SSID of a Wi-Fi interface. Get-NetConnectionProfile works for both the interactive
     # user and the SYSTEM account under which the WMI polls run (verified). netsh wlan
     # requires location permission + elevation, so it is only a fallback.
-    function Get-InterfaceSsid([string]$alias) {
-        try {
-            $p = Get-NetConnectionProfile -InterfaceAlias $alias -ErrorAction SilentlyContinue
-            if ($p -and $p.Name) { return $p.Name }
-        } catch {}
+function Get-InterfaceSsid([string]$alias) {
+        for ($i = 0; $i -lt 3; $i++) {
+            try {
+                $p = Get-NetConnectionProfile -InterfaceAlias $alias -ErrorAction SilentlyContinue
+                if ($p -and $p.Name) { return $p.Name }
+            } catch {}
+            Start-Sleep -Milliseconds 300
+        }
         try {
             foreach ($line in (netsh wlan show interfaces 2>$null)) {
                 if ($line -match '^\s*SSID\s*:\s*(.+?)\s*$') { return $Matches[1].Trim() }
@@ -232,8 +238,8 @@ try {
         if ($newState -like '*|*') {
             $parts = $newState.Split('|')
             if ($parts.Count -ne 2 -or -not $parts[0] -or -not $parts[1]) { return $false }
-            $r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceAlias $parts[0] -ErrorAction SilentlyContinue |
-                Where-Object { $_.RouteMetric -eq 1 -and $_.NextHop -eq $parts[1] }
+$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceAlias $parts[0] -ErrorAction SilentlyContinue |
+                Where-Object { $_.RouteMetric -le 3 -and $_.NextHop -eq $parts[1] }
             return [bool]$r
         }
         $p = @(Get-NetRoute -PolicyStore 'PersistentStore' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
@@ -297,15 +303,15 @@ if ($gw) { $newState = '{0}|{1}' -f $prefer.Name, $gw } else { $newState = 'pend
         # right now, end-to-end THROUGH that interface (not just by Windows' claim and not just
         # by "the gateway answers", which a hotspot always does even with no data).
         # A failed gateway is also kept on cooldown, so we never flap back to it.
-        $approved = $prefer -and $prefer.Name -eq $EthName
+$approved = $prefer -and $prefer.Name -eq $EthName
         if (-not $approved -and $prefer -and $newState -like '*|*') {
             $gw = ($newState -split '\|')[1]
             $src = Get-SourceIp $prefer.Name
             $liveE2E = Probe-Via-Source $src $gw $prefer.ifIndex
             $blocked = Block-Cooldown $gw
-            if ($wifiInternet -and $liveE2E -and -not $blocked) {
+            if ($liveE2E -and -not $blocked) {
                 $approved = $true
-                Write-Log ("GATE approved pin: iface={0} gw={1} src={2} liveProbe={3}" -f $prefer.Name, $gw, $src, $liveE2E)
+                Write-Log ("GATE approved pin: iface={0} gw={1} src={2} profile=Internet={3} liveProbe={4}" -f $prefer.Name, $gw, $src, $wifiInternet, $liveE2E)
             } else {
                 Write-Log ("GATE blocked pin: iface={0} gw={1} src={2} profile=Internet={3} liveProbe={4} cooldown={5} - keeping current source" -f $prefer.Name, $gw, $src, $wifiInternet, $liveE2E, $blocked)
                 $prefer = $null; $rule = $null; $newState = 'eth'
@@ -314,6 +320,20 @@ if ($gw) { $newState = '{0}|{1}' -f $prefer.Name, $gw } else { $newState = 'pend
 
 $prevState = ''
         if (Test-Path $StateFile) { $prevState = (Get-Content $StateFile -Raw).Trim() }
+
+        # Detection-hiccup guard: if the phone rule did not match ONLY because the SSID could not
+        # be read right now, but this adapter is Up, still carries the pinned default route and
+        # passes an end-to-end probe through it, keep the current decision instead of yanking the
+        # Internet back to the cable (a momentary empty SSID read must never cut your connection).
+        if ($prefer -eq $null -and $prevState -like '*|*') {
+            $pv = $prevState.Split('|')
+            $pvAd = Get-NetAdapter -Name $pv[0] -ErrorAction SilentlyContinue
+            $pvRoute = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceAlias $pv[0] -NextHop $pv[1] -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($pvAd -and $pvAd.Status -eq 'Up' -and $pvRoute -and (Probe-Via-Source (Get-SourceIp $pv[0]) $pv[1] $pvAd.ifIndex)) {
+                Write-Log ("GATE keep: pin {0} still alive (SSID read unavailable) - source unchanged" -f $prevState)
+                return
+            }
+        }
 
         # LAN maintenance runs on EVERY poll (also when nothing else changed): re-pin the LAN
         # route to the cable's current IP, or shed it when the cable is not connected.
@@ -329,7 +349,8 @@ $prevState = ''
                         Remove-LanPin $p.NextHop
                     }
                 }
-                $have = Get-NetRoute -DestinationPrefix $LanSubnet -RouteMetric 1 -InterfaceIndex $eth.InterfaceIndex -ErrorAction SilentlyContinue
+$have = Get-NetRoute -PolicyStore 'PersistentStore' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                    Where-Object { $_.DestinationPrefix -eq $LanSubnet -and $_.InterfaceIndex -eq $eth.InterfaceIndex }
                 if (-not $have -and $nm.net) { route -p add $nm.net mask $nm.mask $eth.IPAddress metric 1 | Out-Null }
             } else {
                 Remove-PersistentLan

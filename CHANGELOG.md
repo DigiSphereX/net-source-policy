@@ -2,6 +2,29 @@
 
 All notable changes to NetSource Policy are documented here.
 
+## [2.1.3] - 2026-09-12
+
+### Fixed
+- The phone hotspot could be left unused even when it really had Internet. The approval gate
+  required BOTH a live end-to-end probe through the phone AND Windows' own network profile
+  (`Internet` connectivity). Windows frequently reports a tethered interface as *No Internet*
+  (NCSI is unreliable on hotspot/tether links), so the probe proved the phone was working but
+  the engine still blocked it and stayed on the cable. The probe through the chosen interface
+  is now the single ground truth: it succeeds -> the phone is pinned (the profile state is
+  logged for information only).
+- A hiccup reading the hotspot SSID used to switch the Internet back to the cable ("Internet
+  cut" symptoms). If the phone rule does not match only because the SSID could not be read in
+  that instant, the engine verifies the existing pin with a fresh end-to-end probe and keeps
+  it (plus the SSID read now retries 3 times).
+- A leaked temporary probe route (`8.8.8.0/24` from an interrupted run) previously made every
+  probe fail permanently. The probe now always clears a leftover temp route before testing.
+- The Home-LAN persistent pin was never re-created because the "is it present" check looked at
+  the active table (which always has the DHCP on-link route). It now checks the persistent
+  store, so `192.168.0.0/24` is really pinned to the cable again.
+- `State-Sane` used to demand an exact route metric; relaxed so a run cannot re-apply forever.
+- Background polls that collide with another engine run now log `poll skipped: engine busy`
+  so a stalled holder is visible in the log instead of silent.
+
 ## [2.1.2] - 2026-09-12
 
 ### Fixed
