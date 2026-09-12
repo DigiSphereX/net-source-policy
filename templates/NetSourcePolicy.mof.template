@@ -1,0 +1,48 @@
+#PRAGMA AUTORECOVER
+#pragma namespace("\\\\.\\root\\subscription")
+
+instance of __EventFilter as $Filter
+{
+    EventNamespace = "root\\cimv2";
+    Name = "NPS_EventFilter";
+    Query = "SELECT * FROM __InstanceModificationEvent WITHIN 2 WHERE TargetInstance ISA 'Win32_NetworkAdapter' AND TargetInstance.NetConnectionStatus != PreviousInstance.NetConnectionStatus";
+    QueryLanguage = "WQL";
+};
+
+instance of CommandLineEventConsumer as $Consumer
+{
+    Name = "NPS_EventConsumer";
+    ExecutablePath = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+    CommandLineTemplate = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{{SCRIPT}}\" -Action Apply";
+    WorkingDirectory = "C:\\";
+    RunInteractively = FALSE;
+};
+
+instance of __EventFilter as $PollFilter
+{
+    EventNamespace = "root\\cimv2";
+    Name = "NPS_PollFilter";
+    Query = "SELECT * FROM __InstanceCreationEvent WITHIN {{POLL_SECONDS}} WHERE TargetInstance ISA 'Win32_Process'";
+    QueryLanguage = "WQL";
+};
+
+instance of CommandLineEventConsumer as $PollConsumer
+{
+    Name = "NPS_PollConsumer";
+    ExecutablePath = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+    CommandLineTemplate = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{{SCRIPT}}\" -Action Apply -Poll";
+    WorkingDirectory = "C:\\";
+    RunInteractively = FALSE;
+};
+
+instance of __FilterToConsumerBinding
+{
+    Filter = $Filter;
+    Consumer = $Consumer;
+};
+
+instance of __FilterToConsumerBinding as $PollBinding
+{
+    Filter = $PollFilter;
+    Consumer = $PollConsumer;
+};

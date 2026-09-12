@@ -1,0 +1,17 @@
+{
+    "rules":  [
+                  {
+                      "enabled":  true,
+                      "interface":  "Wi-Fi",
+                      "ssidPrefix":  "My Hotspot*",
+                      "metricPrefer":  1,
+                      "metricDefault":  50
+                  }
+              ],
+    "ethernetInterface":  "Ethernet",
+    "lanSubnet":  "192.168.0.0/24",
+    "lanEnabled":  true,
+    "autoFallback":  true,
+    "pollSeconds":  10,
+    "ethernetMetric":  5
+}

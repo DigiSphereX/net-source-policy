@@ -1,0 +1,17 @@
+# runtime state (machine-local)
+data/
+
+# personal config (a sample is shipped as config/config.sample.json)
+config/config.json
+
+# generated WMI MOF
+.generated/
+
+# elevated-run wrapper (created on demand)
+.run_elevated.ps1
+
+# OS/metadata
+Thumbs.db
+desktop.ini
+*.suo
+*.user
