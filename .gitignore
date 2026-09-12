@@ -10,6 +10,9 @@ config/config.json
 # elevated-run wrapper (created on demand)
 .run_elevated.ps1
 
+# local release packaging
+dist/
+
 # OS/metadata
 Thumbs.db
 desktop.ini
