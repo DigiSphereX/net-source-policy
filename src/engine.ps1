@@ -19,7 +19,9 @@ $DataDir  = Join-Path $AppRoot 'data'
 $LogDir   = Join-Path $DataDir 'logs'
 $LogFile  = Join-Path $LogDir 'netpolicy.log'
 $StateFile = Join-Path $DataDir 'state.txt'
+$BlockFile = Join-Path $DataDir 'route-blocks.txt'
 $MinPollSeconds = 6
+$CooldownMin = 3
 
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 New-Item -ItemType Directory -Path (Split-Path $MofOut) -Force | Out-Null
@@ -84,6 +86,42 @@ try {
         return $false
     }
 
+    # True end-to-end probe THROUGH a specific interface (source-bound ping).
+    # This is what actually decides "does the phone really give Internet right now",
+    # instead of trusting Windows' claim that the SSID is "Internet".
+    function Probe-Via-Source([string]$src) {
+        if (-not $src) { return $false }
+        return [bool](Test-Connection -ComputerName '8.8.8.8' -Source $src -Count 1 -Quiet -ErrorAction SilentlyContinue)
+    }
+
+    # Cooldown: after a gateway was pinned and proven dead, do not re-pin it for a few minutes,
+    # so the engine does not flap between adapters while a hotspot is unstable.
+    function Get-Blocks {
+        $map = @{}
+        if (Test-Path $BlockFile) {
+            foreach ($line in (Get-Content $BlockFile -ErrorAction SilentlyContinue)) {
+                $p = $line.Split('|')
+                if ($p.Count -eq 2) {
+                    $u = $null
+                    if ([datetime]::TryParse($p[1], [ref]$u)) { $map[$p[0]] = $u }
+                }
+            }
+        }
+        return $map
+    }
+
+    function Block-Cooldown([string]$gw) {
+        $m = Get-Blocks
+        return ($m.ContainsKey($gw) -and $m[$gw] -gt (Get-Date))
+    }
+
+    function Set-Cooldown([string]$gw) {
+        $until = (Get-Date).AddMinutes($CooldownMin).ToString('o')
+        $lines = @((Get-Blocks).GetEnumerator() | ForEach-Object { '{0}|{1}' -f $_.Key, $_.Value.ToString('o') })
+        $lines += ('{0}|{1}' -f $gw, $until)
+        Set-Content -Path $BlockFile -Value $lines -ErrorAction SilentlyContinue
+    }
+
     function Get-SourceIp([string]$alias) {
         (Get-NetIPAddress -InterfaceAlias $alias -AddressFamily IPv4 -ErrorAction SilentlyContinue |
             Where-Object { $_.AddressState -eq 'Preferred' } | Select-Object -First 1).IPAddress
@@ -108,6 +146,56 @@ try {
         }
     }
 
+    function Get-LanNetMask {
+        $net = $null
+        $mask = '255.255.255.0'
+        if ($LanSubnet -match '^(\d+\.\d+\.\d+\.\d+)/(\d+)$') {
+            $net = $Matches[1]
+            $bits = [int]$Matches[2]
+            if ($bits -ge 1 -and $bits -le 32) {
+                $mv = [uint32]::MaxValue -shl (32 - $bits)
+                $mask = '{0}.{1}.{2}.{3}' -f (($mv -shr 24) -band 0xFF), (($mv -shr 16) -band 0xFF), (($mv -shr 8) -band 0xFF), ($mv -band 0xFF)
+            }
+        }
+        return @{ net = $net; mask = $mask }
+    }
+
+    # Remove one persistent LAN route pin. Remove-NetRoute may throw 'InterfaceIndex 0'
+    # (a known cmdlet limitation for gateway persistent routes); the cmd route fallback
+    # always works, exactly like the v1 default-route ghost fix.
+    function Remove-LanPin([string]$nextHop) {
+        $nm = Get-LanNetMask
+        if (-not $nm.net -or -not $nextHop) { return }
+        try {
+            Get-NetRoute -PolicyStore 'PersistentStore' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { $_.DestinationPrefix -eq $LanSubnet -and $_.NextHop -eq $nextHop } |
+                Remove-NetRoute -PolicyStore 'PersistentStore' -Confirm:$false -ErrorAction Stop
+        } catch {}
+        cmd.exe /c "route -p delete $($nm.net) mask $($nm.mask) $nextHop" | Out-Null
+    }
+
+    function Remove-PersistentLan {
+        $nm = Get-LanNetMask
+        $pins = @(Get-NetRoute -PolicyStore 'PersistentStore' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.DestinationPrefix -eq $LanSubnet })
+        foreach ($p in $pins) {
+            if ($p.NextHop -and $nm.net) {
+                try {
+                    Remove-NetRoute -PolicyStore 'PersistentStore' -DestinationPrefix $p.DestinationPrefix -NextHop $p.NextHop -Confirm:$false -ErrorAction Stop
+                } catch {}
+                cmd.exe /c "route -p delete $($nm.net) mask $($nm.mask) $($p.NextHop)" | Out-Null
+            }
+        }
+        if ($nm.net) {
+            $lp = route print -4 2>$null
+            foreach ($row in $lp) {
+                if ($row -match ("^\s*" + [regex]::Escape($nm.net) + "\s+" + $nm.mask + "\s+(\d+\.\d+\.\d+\.\d+)\s+\d+$")) {
+                    route -p delete $nm.net mask $nm.mask $Matches[1] 2>$null | Out-Null
+                }
+            }
+        }
+    }
+
     function State-Sane {
         if ($newState -like '*|*') {
             $parts = $newState.Split('|')
@@ -124,7 +212,7 @@ try {
             if ($m -and $m -ne $r.metricDefault) { return $false }
         }
         $em = (Get-NetIPInterface -InterfaceAlias $EthName -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).InterfaceMetric
-        return ($p.Count -eq 0 -and $em -eq $EthMetric)
+        return ($p.Count -eq 0 -and ($null -eq $em -or $em -eq $EthMetric))
     }
 
     function Apply-Decision {
@@ -171,26 +259,51 @@ try {
             if ($gw) { $newState = '{0}|{1}' -f $prefer.Name, $gw } else { $newState = 'pending' }
         }
 
-        # GATE: only pin the Internet through the preferred adapter when it is PROVEN usable right now
-        # (profile says Internet AND its gateway answers). Otherwise never touch routing and let
-        # Windows keep using the working adapter - the Internet must never be black-holed.
+        # GATE: only pin the Internet through the preferred adapter when it is PROVEN usable
+        # right now, end-to-end THROUGH that interface (not just by Windows' claim and not just
+        # by "the gateway answers", which a hotspot always does even with no data).
+        # A failed gateway is also kept on cooldown, so we never flap back to it.
         $approved = $prefer -and $prefer.Name -eq $EthName
         if (-not $approved -and $prefer -and $newState -like '*|*') {
             $gw = ($newState -split '\|')[1]
             $src = Get-SourceIp $prefer.Name
-            $gwReachable = $false
-            if ($gw -and $src) {
-                $gwReachable = [bool](Test-Connection -ComputerName $gw -Source $src -Count 1 -Quiet -ErrorAction SilentlyContinue)
-            }
-            if ($wifiInternet -and $gwReachable) { $approved = $true }
-            else {
-                Write-Log ("GATE blocked pin: iface={0} gw={1} src={2} profile=Internet={3} gwReachable={4}" -f $prefer.Name, $gw, $src, $wifiInternet, $gwReachable)
+            $liveE2E = Probe-Via-Source $src
+            $blocked = Block-Cooldown $gw
+            if ($wifiInternet -and $liveE2E -and -not $blocked) {
+                $approved = $true
+                Write-Log ("GATE approved pin: iface={0} gw={1} src={2} liveProbe={3}" -f $prefer.Name, $gw, $src, $liveE2E)
+            } else {
+                Write-Log ("GATE blocked pin: iface={0} gw={1} src={2} profile=Internet={3} liveProbe={4} cooldown={5} - keeping current source" -f $prefer.Name, $gw, $src, $wifiInternet, $liveE2E, $blocked)
                 $prefer = $null; $rule = $null; $newState = 'eth'
             }
         }
 
         $prevState = ''
         if (Test-Path $StateFile) { $prevState = (Get-Content $StateFile -Raw).Trim() }
+
+        # LAN maintenance runs on EVERY poll (also when nothing else changed): re-pin the LAN
+        # route to the cable's current IP, or shed it when the cable is not connected.
+        if ($LanEnabled) {
+            $eth = Get-NetIPAddress -InterfaceAlias $EthName -AddressFamily IPv4 |
+                Where-Object { $_.AddressState -eq 'Preferred' } | Select-Object -First 1
+            if ($eth) {
+                $nm = Get-LanNetMask
+                $lanPins = @(Get-NetRoute -PolicyStore 'PersistentStore' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                    Where-Object { $_.DestinationPrefix -eq $LanSubnet })
+                foreach ($p in $lanPins) {
+                    if ($p.InterfaceIndex -ne $eth.InterfaceIndex -or $p.NextHop -ne $eth.IPAddress) {
+                        Remove-LanPin $p.NextHop
+                    }
+                }
+                $have = Get-NetRoute -DestinationPrefix $LanSubnet -RouteMetric 1 -InterfaceIndex $eth.InterfaceIndex -ErrorAction SilentlyContinue
+                if (-not $have -and $nm.net) { route -p add $nm.net mask $nm.mask $eth.IPAddress metric 1 | Out-Null }
+            } else {
+                Remove-PersistentLan
+            }
+        } else {
+            Remove-PersistentLan
+        }
+
         if ($prevState -eq $newState -and (State-Sane)) { return }
 
         foreach ($r in $Rules) {
@@ -213,38 +326,15 @@ try {
             }
         }
 
-        if ($LanEnabled) {
-            $eth = Get-NetIPAddress -InterfaceAlias $EthName -AddressFamily IPv4 |
-                Where-Object { $_.AddressState -eq 'Preferred' } | Select-Object -First 1
-            if ($eth) {
-                $have = Get-NetRoute -DestinationPrefix $LanSubnet -RouteMetric 1 -InterfaceIndex $eth.InterfaceIndex -ErrorAction SilentlyContinue
-                if (-not $have) {
-                    $net = $null
-                    $mask = '255.255.255.0'
-                    if ($LanSubnet -match '^(\d+\.\d+\.\d+\.\d+)/(\d+)$') {
-                        $net = $Matches[1]
-                        $bits = [int]$Matches[2]
-                        if ($bits -ge 1 -and $bits -le 32) {
-                            $mv = [uint32]::MaxValue -shl (32 - $bits)
-                            $mask = '{0}.{1}.{2}.{3}' -f (($mv -shr 24) -band 0xFF), (($mv -shr 16) -band 0xFF), (($mv -shr 8) -band 0xFF), ($mv -band 0xFF)
-                        }
-                    }
-                    if ($net) { route -p add $net mask $mask $eth.IPAddress metric 1 | Out-Null }
-                }
-            }
-        } else {
-            Get-NetRoute -PolicyStore 'PersistentStore' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-                Where-Object { $_.DestinationPrefix -eq $LanSubnet } |
-                Remove-NetRoute -PolicyStore 'PersistentStore' -Confirm:$false -ErrorAction SilentlyContinue
-        }
-
         Set-Content -Path $StateFile -Value $newState
         Write-Log ("CHANGED ssid={0} wifiInternet={1} approvedPin={2} route={3}" -f $ssid, $wifiInternet, $approved, $newState)
 
         # POST-CHECK: after any routing change, verify the Internet still works; if it does not,
-        # undo everything so Windows automatic routing takes over (must never stay cut).
+        # undo everything so Windows automatic routing takes over (must never stay cut),
+        # and put the failed gateway on cooldown so we do not re-pin it next poll.
         Start-Sleep -Milliseconds 900
         if (-not (Probe-Internet)) {
+            if ($approved -and $newState -like '*|*') { Set-Cooldown (($newState -split '\|')[1]) }
             Restore-Internet
             Start-Sleep -Milliseconds 900
             Write-Log ("POST-CHECK: Internet unreachable after routing change - restored automatic routing, now internetOk={0}" -f (Probe-Internet))
@@ -287,16 +377,11 @@ try {
             if (-not (Is-Admin)) { Start-Process powershell -Verb RunAs -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"",'-Action','Uninstall'; return }
             Remove-WmiInstances
             Remove-PersistentDefaults
-            $eth = Get-NetIPAddress -InterfaceAlias $EthName -AddressFamily IPv4 |
-                Where-Object { $_.AddressState -eq 'Preferred' } | Select-Object -First 1
-            if ($eth) {
-                Get-NetRoute -PolicyStore 'PersistentStore' -AddressFamily IPv4 |
-                    Where-Object { $_.DestinationPrefix -eq $LanSubnet } |
-                    Remove-NetRoute -PolicyStore 'PersistentStore' -Confirm:$false -ErrorAction SilentlyContinue
-            }
+            Remove-PersistentLan
             Reset-Metrics
             if (Test-Path $StateFile) { Remove-Item $StateFile -Force }
             if (Test-Path (Join-Path $LogDir 'lastpoll.txt')) { Remove-Item (Join-Path $LogDir 'lastpoll.txt') -Force }
+            if (Test-Path $BlockFile) { Remove-Item $BlockFile -Force }
             Write-Log 'UNINSTALLED NetSource Policy engine'
         }
         'Status' {
