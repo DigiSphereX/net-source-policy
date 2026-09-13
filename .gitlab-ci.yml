@@ -1,0 +1,12 @@
+# Minimal GitLab CI for this mirrored project (source of truth: GitHub).
+# A pipeline appears after each push; the job runs only when triggered manually.
+stages:
+  - validate
+
+validate:
+  stage: validate
+  image: alpine:latest
+  script:
+    - echo "Mirrored project - no automated build required."
+  rules:
+    - when: manual
