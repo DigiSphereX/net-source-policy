@@ -1,5 +1,5 @@
 ﻿# ============================================================================
-#  NetSource Policy  v2.1.3  -  portable GUI
+#  NetSource Policy  v2.1.4  -  portable GUI
 #  Decide which connection supplies the Internet and set network priorities.
 #  Open source (MIT).  (c) 2026 M. Basheer (DigiSphereX)
 # ============================================================================
@@ -13,7 +13,8 @@ $AppRoot      = Split-Path -Parent $PSScriptRoot
 $Engine       = Join-Path $AppRoot 'src\engine.ps1'
 $CfgPath      = Join-Path $AppRoot 'config\config.json'
 $LogFile      = Join-Path $AppRoot 'data\logs\netpolicy.log'
-$Version      = '2.1.0'
+$Version      = '2.1.4'
+$RepoUrl      = 'https://github.com/DigiSphereX/net-source-policy'
 
 $script:Cfg = $null
 $script:Busy = $false
@@ -130,6 +131,43 @@ $lblLicense.TextAlign = 'MiddleRight'
 $status.Items.Add($lblStatus) | Out-Null
 $status.Items.Add($lblLicense) | Out-Null
 $form.Controls.Add($status)
+
+# ---------------- menu ----------------
+$menu = New-Object System.Windows.Forms.MenuStrip
+
+$miEngine = New-Object System.Windows.Forms.ToolStripMenuItem('Engine')
+$miRefresh = New-Object System.Windows.Forms.ToolStripMenuItem('Refresh now')
+$miRefresh.Add_Click({ $btnRefresh.PerformClick() })
+$miApply = New-Object System.Windows.Forms.ToolStripMenuItem('Apply & Install')
+$miApply.Add_Click({ $btnApply.PerformClick() })
+$miUninstall = New-Object System.Windows.Forms.ToolStripMenuItem('Uninstall / Restore defaults')
+$miUninstall.Add_Click({ $btnUninstall.PerformClick() })
+$miEngine.DropDownItems.AddRange(@($miRefresh, $miApply, $miUninstall))
+
+$miHelp = New-Object System.Windows.Forms.ToolStripMenuItem('Help')
+$miAbout = New-Object System.Windows.Forms.ToolStripMenuItem('About NetSource Policy')
+$miAbout.Add_Click({ $tabs.SelectedTab = $tabAbout; $form.Activate() })
+$miDisclaimer = New-Object System.Windows.Forms.ToolStripMenuItem('Disclaimer & backup advice')
+$miDisclaimer.Add_Click({
+    [System.Windows.Forms.MessageBox]::Show(
+"NetSource Policy changes routing tables, interface metrics, persistent routes and WMI subscriptions, and requires administrator rights. Use it at your own risk.
+
+Back up first:
+ - Keep a copy of this folder (especially config\config.json, templates\, data\logs\).
+ - Note your current 'route print' output and interface metrics so you can restore them manually if needed.
+
+While routes are changed, Internet traffic can be interrupted - and on rare, machine-specific setups the engine may behave unexpectedly. 'Uninstall / Restore defaults' in the GUI restores Windows defaults.
+
+The author is not responsible for any unintentional damage or data loss.",
+'NetSource Policy - Disclaimer', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+})
+$miGithub = New-Object System.Windows.Forms.ToolStripMenuItem('Open GitHub page')
+$miGithub.Add_Click({ Start-Process $RepoUrl })
+$miHelp.DropDownItems.AddRange(@($miAbout, $miDisclaimer, $miGithub))
+
+$menu.Items.AddRange(@($miEngine, $miHelp))
+$form.Controls.Add($menu)
+$form.MainMenuStrip = $menu
 
 $tabs = New-Object System.Windows.Forms.TabControl
 $tabs.Dock = 'Fill'
@@ -446,6 +484,16 @@ foreach ($line in $rows) {
     if ($line.Length -gt 2 -and $line -notlike ' - *' -and $line -ne 'How it works' -and $line -ne 'Files (portable)') { $l.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold) }
     $ab.Controls.Add($l)
 }
+
+$ab.Controls.Add((New-Lbl '' 800 6 $false 9))
+$gh = New-Lbl 'GitHub: DigiSphereX/net-source-policy' 800 24 $false 10
+$gh.ForeColor = [System.Drawing.Color]::DodgerBlue
+$ab.Controls.Add($gh)
+$ab.Controls.Add((New-Lbl '' 800 6 $false 9))
+$dHead = New-Lbl 'DISCLAIMER' 800 24 $true 10
+$dHead.ForeColor = [System.Drawing.Color]::Firebrick
+$ab.Controls.Add($dHead)
+$ab.Controls.Add((New-Lbl 'NetSource Policy changes routing tables, interface metrics, persistent routes and WMI subscriptions, and requires administrator rights. Use it at your own risk. Always back up this folder (config\config.json, templates\, data\logs\) and your current routing before applying. Internet traffic can be interrupted while routes change; on rare machine-specific setups the engine may behave unexpectedly. ''Uninstall / Restore defaults'' restores Windows defaults. The author is not responsible for unintentional damage or data loss.' 800 80 $false 9))
 
 # ======================= behaviors =======================
 function Build-Rules {

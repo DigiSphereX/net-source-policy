@@ -133,6 +133,23 @@ thank-you means a lot and keeps it maintained:
 - **GitHub Sponsors** -> <https://github.com/sponsors/DigiSphereX>
 - **PayPal** -> <https://www.paypal.com/donate/?hosted_button_id=CFANQH892RPH2>
 
+## Disclaimer / Backup advice
+
+NetSource Policy changes routing tables, interface metrics, persistent routes and WMI
+event subscriptions, and **requires administrator rights**. Use it at your own risk:
+
+- **Back up before applying.** Keep a copy of this folder (especially
+  `config\config.json`, `templates\`, `data\logs\`) and note your current `route print -4`
+  output and interface metrics, so you can restore them manually if needed.
+- While routes are being changed, Internet traffic can be interrupted - even on unmodified
+  machines a momentary drop can occur, and on rare, machine-specific setups behaviour may
+  not be fully predictable.
+- The tool ships with **Uninstall / Restore defaults** (GUI button and menu) which removes
+  the WMI consumers, persistent routes and priority metrics and restores Windows defaults.
+
+The author is not responsible for any unintentional damage or data loss caused by using
+this tool.
+
 ## License
 
 MIT - see `LICENSE`. (c) 2026 M. Basheer (DigiSphereX).

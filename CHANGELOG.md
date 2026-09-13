@@ -2,6 +2,18 @@
 
 All notable changes to NetSource Policy are documented here.
 
+## [2.1.4] - 2026-09-13
+
+### Added
+- Menu bar in the GUI: **Engine** (Refresh now / Apply & Install / Uninstall - Restore
+  defaults) and **Help** (About NetSource Policy / Disclaimer & backup advice / Open GitHub page).
+- About tab now shows the GitHub page and a clear **DISCLAIMER** with backup advice.
+- Added a README disclaimer warning the tool manipulates routing and WMI and advising to
+  back up before applying.
+
+### Fixed
+- The About tab reported the stale version "2.1.0"; it now shows the real version.
+
 ## [2.1.3] - 2026-09-12
 
 ### Fixed
