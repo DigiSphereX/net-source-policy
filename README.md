@@ -125,14 +125,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File src\engine.ps1 -Action Apply
 powershell -NoProfile -ExecutionPolicy Bypass -File src\engine.ps1 -Action Status
 ```
 
-## Support this project ☕
-
-Free and open source (MIT). If this tool saved you time or saved your network, a small
-thank-you means a lot and keeps it maintained:
-
-- **GitHub Sponsors** -> <https://github.com/sponsors/DigiSphereX>
-- **PayPal** -> <https://www.paypal.com/donate/?hosted_button_id=CFANQH892RPH2>
-
 ## Disclaimer / Backup advice
 
 NetSource Policy changes routing tables, interface metrics, persistent routes and WMI
@@ -153,3 +145,10 @@ this tool.
 ## License
 
 MIT - see `LICENSE`. (c) 2026 M. Basheer (DigiSphereX).
+
+## ☕ Support this project
+
+Free and open source (MIT). If this project saved you time or money, consider a small thank-you:
+
+- **GitHub Sponsors** -> https://github.com/sponsors/DigiSphereX
+- **PayPal** -> https://www.paypal.com/donate/?hosted_button_id=CFANQH892RPH2
