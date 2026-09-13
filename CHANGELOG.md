@@ -2,6 +2,26 @@
 
 All notable changes to NetSource Policy are documented here.
 
+## [2.1.5] - 2026-09-13
+
+### Fixed
+- **Conflict with AdGuard / other VPN software:** the engine used to delete *every*
+  persistent `0.0.0.0/0` route before re-pinning, including routes owned by other software
+  (e.g. AdGuard VPN, WireGuard). Cleaning the persistent defaults is now scoped strictly to
+  the gateways the tool itself manages (its rule/ethernet interfaces plus the currently
+  pinned gateway), so foreign tunnels keep working.
+- **Intermittent Internet drops:** every poll transiently added and removed a temporary
+  `8.8.8.0/24` probe route, churning the routing table a few times a minute (and
+  re-triggering monitoring software). That add/delete drumbeat is gone: a gateway proven
+  end-to-end within the last 15 seconds is re-used without touching the table. Probes now
+  also use fewer endpoints with shorter timeouts.
+- **Cut on a single slow packet:** the post-change check treated one late reply as "Internet
+  is dead" and immediately restored automatic routing (which itself cut the line for
+  6-10 s). It now retries up to 3 times before taking emergency action.
+- **False "Internet OK":** the connectivity probe used a DNS-name lookup
+  (`www.github.com`), which AdGuard/a VPN can answer locally while the WAN is dead. The
+  probe is now raw connectivity only (ICMP + TCP), never DNS resolution.
+
 ## [2.1.4] - 2026-09-13
 
 ### Added

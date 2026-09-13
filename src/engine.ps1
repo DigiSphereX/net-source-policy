@@ -1,4 +1,4 @@
-# NetSource Policy - portable routing engine (v2.1.4)
+# NetSource Policy - portable routing engine (v2.1.5)
 # Actions: Apply | Install | Uninstall | Status    (optional -Poll = background re-check)
 # The engine reads config\config.json and applies interface metrics + persistent routes
 # so that the chosen Internet source and the home-LAN priority match the user's rules.
@@ -20,6 +20,7 @@ $LogDir   = Join-Path $DataDir 'logs'
 $LogFile  = Join-Path $LogDir 'netpolicy.log'
 $StateFile = Join-Path $DataDir 'state.txt'
 $BlockFile = Join-Path $DataDir 'route-blocks.txt'
+$ProbeCache = Join-Path $DataDir 'probe-cache.txt'
 $MinPollSeconds = 6
 $CooldownMin = 3
 
@@ -82,9 +83,18 @@ try {
     }
 
 function Probe-Internet {
+        # Real connectivity ONLY: ICMP + raw TCP. No DNS-name lookups - AdGuard / a
+        # VPN can answer DNS locally while the WAN is dead, which would falsely
+        # "prove" Internet and leave a dead pin in force.
         if (Test-Connection -ComputerName '8.8.8.8' -Count 1 -Quiet -ErrorAction SilentlyContinue) { return $true }
         if (Test-Connection -ComputerName '1.1.1.1' -Count 1 -Quiet -ErrorAction SilentlyContinue) { return $true }
-        try { if ([System.Net.Dns]::GetHostAddresses('www.github.com')) { return $true } } catch {}
+        foreach ($ep in @(@('1.1.1.1', 443), @('8.8.8.8', 53))) {
+            $c = New-Object System.Net.Sockets.TcpClient
+            try {
+                $ar = $c.BeginConnect($ep[0], $ep[1], $null, $null)
+                if ($ar.AsyncWaitHandle.WaitOne(2000) -and $c.Connected) { return $true }
+            } catch {} finally { $c.Close() }
+        }
         return $false
     }
 
@@ -100,11 +110,11 @@ if (-not $src -or -not $gw -or -not $ifIndex) { return $false }
         cmd.exe /c "route delete 8.8.8.0 mask 255.255.255.0" | Out-Null
         cmd.exe /c "route add 8.8.8.0 mask 255.255.255.0 $gw metric 1 if $ifIndex" | Out-Null
         try {
-            foreach ($ep in @(@('8.8.8.8', 53), @('1.1.1.1', 80), @('1.1.1.1', 443))) {
+foreach ($ep in @(@('8.8.8.8', 53), @('1.1.1.1', 443))) {
                 $c = New-Object System.Net.Sockets.TcpClient
                 try {
                     $ar = $c.BeginConnect($ep[0], $ep[1], $null, $null)
-                    if ($ar.AsyncWaitHandle.WaitOne(2500) -and $c.Connected) { return $true }
+                    if ($ar.AsyncWaitHandle.WaitOne(1500) -and $c.Connected) { return $true }
                 } catch {} finally { $c.Close() }
             }
             return $false
@@ -157,7 +167,34 @@ function Get-InterfaceSsid([string]$alias) {
         $until = (Get-Date).AddMinutes($CooldownMin).ToString('o')
         $lines = @((Get-Blocks).GetEnumerator() | ForEach-Object { '{0}|{1}' -f $_.Key, $_.Value.ToString('o') })
         $lines += ('{0}|{1}' -f $gw, $until)
-        Set-Content -Path $BlockFile -Value $lines -ErrorAction SilentlyContinue
+Set-Content -Path $BlockFile -Value $lines -ErrorAction SilentlyContinue
+    }
+
+    function Get-ProbeFresh([string]$gw, [int]$maxAgeSec) {
+        if (-not (Test-Path $ProbeCache)) { return $false }
+        $now = [datetime]::UtcNow.Ticks
+        $limit = [int64]($maxAgeSec * 10000000)
+        foreach ($line in (Get-Content $ProbeCache -ErrorAction SilentlyContinue)) {
+            $p = $line.Split('|')
+            if ($p.Count -eq 2 -and $p[0] -eq $gw) {
+                $ticks = [int64]0
+                if ([int64]::TryParse($p[1], [ref]$ticks)) {
+                    return (($now - $ticks) -lt $limit)
+                }
+            }
+        }
+        return $false
+    }
+
+    function Set-ProbeNow([string]$gw) {
+        $keep = @()
+        if (Test-Path $ProbeCache) {
+            foreach ($line in (Get-Content $ProbeCache -ErrorAction SilentlyContinue)) {
+                if ($line -and $line -notlike "$gw|*") { $keep += $line }
+            }
+        }
+        Set-Content -Path $ProbeCache -Value $keep -ErrorAction SilentlyContinue
+        Add-Content -Path $ProbeCache -Value ('{0}|{1}' -f $gw, [datetime]::UtcNow.Ticks) -ErrorAction SilentlyContinue
     }
 
     function Get-SourceIp([string]$alias) {
@@ -172,14 +209,31 @@ function Get-InterfaceSsid([string]$alias) {
         Write-Log 'EMERGENCY internet restore - pinned routes cleared, Windows back to automatic routing'
     }
 
-    function Remove-PersistentDefaults {
-        Get-NetRoute -PolicyStore 'PersistentStore' -AddressFamily IPv4 |
-            Where-Object { $_.DestinationPrefix -eq '0.0.0.0/0' } |
+function Remove-PersistentDefaults {
+        # Only remove DEFAULT routes that WE manage: the gateways of our rule/eth
+        # interfaces plus the currently pinned gateway. Never touch persistent
+        # routes owned by other software (AdGuard VPN, WireGuard, ...) - deleting
+        # theirs used to break their connectivity the moment this engine ran.
+        $mine = @{}
+        foreach ($r in $Rules) {
+            $w = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceAlias $r.interface -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1
+            if ($w -and $w.NextHop) { $mine[$w.NextHop] = $true }
+        }
+        $we = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceAlias $EthName -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1
+        if ($we -and $we.NextHop) { $mine[$we.NextHop] = $true }
+        if (Test-Path $StateFile) {
+            $sv = (Get-Content $StateFile -Raw).Trim()
+            if ($sv -like '*|*') { $mine[($sv -split '\|')[1]] = $true }
+        }
+        Get-NetRoute -PolicyStore 'PersistentStore' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.DestinationPrefix -eq '0.0.0.0/0' -and $mine.ContainsKey($_.NextHop) } |
             Remove-NetRoute -PolicyStore 'PersistentStore' -Confirm:$false -ErrorAction SilentlyContinue
         $lp = route print -4 2>$null
         foreach ($row in $lp) {
             if ($row -match '^\s*0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)\s+\d+$') {
-                route -p delete 0.0.0.0 mask 0.0.0.0 $Matches[1] 2>$null | Out-Null
+                if ($mine.ContainsKey($Matches[1])) {
+                    route -p delete 0.0.0.0 mask 0.0.0.0 $Matches[1] 2>$null | Out-Null
+                }
             }
         }
     }
@@ -299,27 +353,36 @@ function Apply-Decision {
 if ($gw) { $newState = '{0}|{1}' -f $prefer.Name, $gw } else { $newState = 'pending' }
         }
 
+$prevState = ''
+        if (Test-Path $StateFile) { $prevState = (Get-Content $StateFile -Raw).Trim() }
+
         # GATE: only pin the Internet through the preferred adapter when it is PROVEN usable
         # right now, end-to-end THROUGH that interface (not just by Windows' claim and not just
         # by "the gateway answers", which a hotspot always does even with no data).
         # A failed gateway is also kept on cooldown, so we never flap back to it.
+        # A gateway proven end-to-end within the last few seconds AND with an unchanged decision
+        # is re-used WITHOUT touching the routing table: the per-poll add/delete of the temporary
+        # probe route churned the routing table constantly (and, with AdGuard / VPN software
+        # monitoring interfaces, triggered momentary drops).  Throttling that churn removes it.
 $approved = $prefer -and $prefer.Name -eq $EthName
         if (-not $approved -and $prefer -and $newState -like '*|*') {
             $gw = ($newState -split '\|')[1]
             $src = Get-SourceIp $prefer.Name
-            $liveE2E = Probe-Via-Source $src $gw $prefer.ifIndex
+            $skipProbe = ($prevState -eq $newState) -and (Get-ProbeFresh $gw 15)
+            $liveE2E = $true
+            if (-not $skipProbe) {
+                $liveE2E = Probe-Via-Source $src $gw $prefer.ifIndex
+                Set-ProbeNow $gw
+            }
             $blocked = Block-Cooldown $gw
             if ($liveE2E -and -not $blocked) {
                 $approved = $true
-                Write-Log ("GATE approved pin: iface={0} gw={1} src={2} profile=Internet={3} liveProbe={4}" -f $prefer.Name, $gw, $src, $wifiInternet, $liveE2E)
+                if (-not $skipProbe) { Write-Log ("GATE approved pin: iface={0} gw={1} src={2} profile=Internet={3} liveProbe={4}" -f $prefer.Name, $gw, $src, $wifiInternet, $liveE2E) }
             } else {
                 Write-Log ("GATE blocked pin: iface={0} gw={1} src={2} profile=Internet={3} liveProbe={4} cooldown={5} - keeping current source" -f $prefer.Name, $gw, $src, $wifiInternet, $liveE2E, $blocked)
                 $prefer = $null; $rule = $null; $newState = 'eth'
             }
         }
-
-$prevState = ''
-        if (Test-Path $StateFile) { $prevState = (Get-Content $StateFile -Raw).Trim() }
 
         # Detection-hiccup guard: if the phone rule did not match ONLY because the SSID could not
         # be read right now, but this adapter is Up, still carries the pinned default route and
@@ -384,15 +447,27 @@ $have = Get-NetRoute -PolicyStore 'PersistentStore' -AddressFamily IPv4 -ErrorAc
         Set-Content -Path $StateFile -Value $newState
         Write-Log ("CHANGED ssid={0} wifiInternet={1} approvedPin={2} route={3}" -f $ssid, $wifiInternet, $approved, $newState)
 
-        # POST-CHECK: after any routing change, verify the Internet still works; if it does not,
+# POST-CHECK: after any routing change, verify the Internet still works; if it does not,
         # undo everything so Windows automatic routing takes over (must never stay cut),
         # and put the failed gateway on cooldown so we do not re-pin it next poll.
+        # A single slow packet (phone NAT still recovering, AdGuard/VPN filtering a moment) must
+        # NOT trigger the emergency restore - that restore itself is what cuts the line. Retry
+        # before concluding the route change actually broke the Internet.
         Start-Sleep -Milliseconds 900
         if (-not (Probe-Internet)) {
-            if ($approved -and $newState -like '*|*') { Set-Cooldown (($newState -split '\|')[1]) }
-            Restore-Internet
-            Start-Sleep -Milliseconds 900
-            Write-Log ("POST-CHECK: Internet unreachable after routing change - restored automatic routing, now internetOk={0}" -f (Probe-Internet))
+            $ok = $false
+            for ($i = 0; $i -lt 3; $i++) {
+                Start-Sleep -Milliseconds 1200
+                if (Probe-Internet) { $ok = $true; break }
+            }
+            if ($ok) {
+                Write-Log 'POST-CHECK: first probe hiccup only, Internet confirmed working after retry - nothing changed'
+            } else {
+                if ($approved -and $newState -like '*|*') { Set-Cooldown (($newState -split '\|')[1]) }
+                Restore-Internet
+                Start-Sleep -Milliseconds 900
+                Write-Log ("POST-CHECK: Internet unreachable after routing change - restored automatic routing, now internetOk={0}" -f (Probe-Internet))
+            }
         }
     }
 

@@ -1,5 +1,5 @@
 ﻿# ============================================================================
-#  NetSource Policy  v2.1.4  -  portable GUI
+#  NetSource Policy  v2.1.5  -  portable GUI
 #  Decide which connection supplies the Internet and set network priorities.
 #  Open source (MIT).  (c) 2026 M. Basheer (DigiSphereX)
 # ============================================================================
@@ -13,7 +13,7 @@ $AppRoot      = Split-Path -Parent $PSScriptRoot
 $Engine       = Join-Path $AppRoot 'src\engine.ps1'
 $CfgPath      = Join-Path $AppRoot 'config\config.json'
 $LogFile      = Join-Path $AppRoot 'data\logs\netpolicy.log'
-$Version      = '2.1.4'
+$Version      = '2.1.5'
 $RepoUrl      = 'https://github.com/DigiSphereX/net-source-policy'
 
 $script:Cfg = $null
